@@ -1,0 +1,631 @@
+*log using "C:\Users\klenow.ECON\Documents\Rawls\FRA\FRA_84_growth.smcl", replace
+*log using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\FRA\FRA_84_growth.smcl", replace
+
+
+*****************************************************************************
+*		 FIND THE GROWTH IN LAMBDA IN FRA BETWEEN 1984 - 2005				*
+* This program computes the % increase in consumption that individuals 	    *
+* need in 1984 to be as well of as they are in 2005 					    *
+*****************************************************************************
+
+*** STEP I: Calculate base (1984) values for CbarFRA, LbarFRA, CineqFRA, 
+* LineqFRA etc using 1984 data and 1990 survival rates. 
+
+*** STEP II, use 2005 data with 1990 survival rates and combine with Part I 
+* and II to get growth lambda's. 
+
+
+**********************************************************
+*********				STEP I  			 *************
+********* 1984 data with 1990 survival rates *************
+**********************************************************
+
+drop _all
+scalar drop _all
+set varabbrev off
+set more off
+**Set parameter values for the utility function
+/*
+scalar ubar = 4.1466
+scalar theta= 14.883
+scalar epsilon= 1
+*/
+**Set type of allocation rule:
+//* 1=Equal Allocation Rule
+//* 2=Square Root Rule
+//* 3=OECD Modified Equivalence Scale
+scalar rule=1
+
+
+* Discard all observations with age > 100 and normalize weights
+quietly {
+use "FRA_84.dta", clear
+*use "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\FRA\FRA_84.dta", clear
+
+*destring pcode, replace
+
+drop if age > 100
+drop if age==.
+
+ren weight weight_temp
+egen weight_total=total(weight_temp)
+gen weight = weight_temp/weight_total
+drop weight_temp weight_total
+}
+
+
+* Apply country year identifying variables to each observation 
+* to facilitate merge with survival data
+
+gen country="France"
+gen country_code="FRA" 
+gen int year=1984
+order country country_code year 
+
+
+/*Create an OECD Modified Equivalence Scale variable 
+*quietly{
+gen OECD1=1 if pcode==1
+gen OECD2=0.5 if pcode~=1 & age>=14
+gen OECD3=0.3 if pcode~=1 & age<14
+egen OECDw= rsum(OECD1 OECD2 OECD3)
+by hhid: egen OECDscale= total(OECDw)
+drop OECD1 OECD2 OECD3 OECDw
+lab var OECDscale "OECD Modified Equivalent Scale for household allocation"
+*}
+*/
+*apply allocation rule 
+foreach var in hhexp {
+if rule==1 {
+replace `var'=`var'/hhsize
+}
+else if rule==2 {
+replace `var'=`var'/sqrt(hhsize)
+}
+else if rule==3 {
+replace `var'=`var'/OECDscale
+}
+}
+
+
+*	Now that we have allocated expenditures to individuals, convert individual consumption from 
+* 	1984 French francs to constant international prices, incorporate govt consumption
+* 	using Penn World Tables 6.3, and scale to year $baseyear US $
+ 
+gen wc=weight*hhexp
+lab var wc "weight*hhexp"
+quietly {
+su wc
+}
+return list
+scalar sum_wc=r(sum) 
+
+*Bring in cpop and gpop by merging with PWT_cpop_gpop.dta
+sort country_code year
+merge m:m country_code year using "$pwt_file"
+*merge m:m country_code year using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\PWT 6.3\PWT_cpop_gpop.dta"
+keep if country_code=="FRA"
+keep if year==1984
+gen c_hat_jit=(cpop/sum_wc)*hhexp + gpop 
+gen chat= c_hat_jit / cgpop_US_$baseyear
+lab var chat "per capita consumption scaled by $baseyear U.S. $"
+drop c_hat_jit wc cpop gpop cgpop cgpop_US_$baseyear _merge 
+
+
+*Check that the weighted average of chat is ?
+gen wchat=weight*chat
+su wchat
+return list
+
+
+foreach var in chat {
+qui {
+gen ln`var'=ln(`var')
+}
+}
+
+
+*sum weights within age groups, create wbar:
+*(individual sampling weight)/(sum of all individual sampling weights in age group) 
+sort age 
+by age: egen total_age_weight=total(weight)
+gen wbar=weight/total_age_weight 
+drop weight total_age_weight
+order age
+
+*Check that wbar sums to 1 within each age group
+*by age: egen total_wbar_a=total(wbar)
+*list age total_wbar_a
+
+replace year=1990
+
+*Merge with country-age level survival rates
+sort country country_code year age 
+merge m:1 country_code year age using "$survival_ind/survivalFRA90.dta"
+*merge m:1 country_code year age using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\Survival Rates\survivalFRA90.dta"
+keep if year==1990
+keep if country_code=="FRA"
+drop _merge
+
+replace year=1984
+
+*create logca, averages over people of the same age. 
+* first create lnchat*wbar for each observation, then sum over age groups
+sort age 
+gen logcja=lnchat*wbar
+by age: egen logca=total(logcja)
+
+*create ca, which are sums of chat*wbar within age groups.
+* Will be used to calculate cbar
+gen cja=chat*wbar
+by age: egen ca=total(cja)
+
+order country country_code year age logca ca wbar 
+
+
+*collapse dataset to have one observation(row) per age group.
+ 
+collapse (mean) logca=logca ca=ca s_FRAa=s_FRAa  delta_s_FRAa= delta_s_FRAa, by(country_code year age)
+
+*If ca=0 then age must be missing.
+gen missing_age=0
+replace missing_age=1 if ca==0
+*list
+
+*Convert variables for missing ages from zero to missing
+foreach var in logca ca{
+replace `var'=. if (missing_age==1) 
+}
+
+
+*interpolate logca, logla, ca, la for missing ages
+foreach var in logca ca {
+ipolate `var' age, gen(i`var')
+replace `var'=i`var'
+drop i`var'
+}
+
+* replace missing values by neighboring non-missing values
+sort age
+foreach var in logca ca {
+replace `var' = `var'[_n-1] if missing(`var')
+}
+save "test.dta",replace
+*generate log_cbar, the log of average ca, with s_FRAa as weights
+* 
+
+gen cbar_a = s_FRAa*ca
+egen cbar = total(cbar_a)
+di cbar
+gen log_cbar = ln(cbar)
+
+*generate Elogc
+gen logc_a = logca*s_FRAa
+egen Elogc = total(logc_a)
+
+drop cbar_a
+
+* Storing base year values in scalars for use in STEP III
+
+scalar log_cbar_84=log_cbar
+scalar Elogc_84=Elogc
+
+scalar Cbar_FRA_84=exp(log_cbar_84)
+scalar Cineq_FRA_84=Elogc_84-log_cbar_84
+
+
+
+
+*********************************************************************
+********** GENERATING BASE VALUES FOR LEISURE TERMS 	*************
+*********************************************************************
+
+
+* Discard all observations with age > 100 and normalize weights
+quietly {
+use "FRA_84.dta", clear
+*use "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\FRA\FRA_84.dta", clear
+drop if age > 100
+drop if age==.
+
+ren weight weight_temp
+egen weight_total=total(weight_temp)
+gen weight = weight_temp/weight_total
+drop weight_temp weight_total
+}
+
+
+* Apply country year identifying variables to each observation 
+* to facilitate merge with survival data
+
+gen country="France"
+gen country_code="FRA" 
+gen int year=1984
+order country country_code year 
+
+
+foreach var in leisure {
+qui {
+gen ln`var'=ln(`var')
+}
+}
+
+
+****************************************
+gen eps_leisure=((1-leisure)^((1+$epsilon)/$epsilon))/((1+$epsilon)/$epsilon)
+su eps_leisure
+scalar sd_eps_leisure_unwt=r(sd)
+****************************************
+
+*sum weights within age groups, create wbar:
+*(individual sampling weight)/(sum of all individual sampling weights in age group) 
+sort age 
+by age: egen total_age_weight=total(weight)
+gen wbar=weight/total_age_weight 
+drop weight total_age_weight
+order age
+
+*Check that wbar sums to 1 within each age group
+*by age: egen total_wbar_a=total(wbar)
+*list age total_wbar_a
+
+replace year=1990
+
+*Merge with country-age level survival rates
+sort country country_code year age 
+merge m:1 country_code year age using "$survival_ind/survivalFRA90.dta"
+*merge m:1 country_code year age using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\Survival Rates\survivalFRA90.dta"
+keep if year==1990
+keep if country_code=="FRA"
+drop _merge
+
+replace year=1984
+
+*create logla, averages over people of the same age. 
+* first create logla*wbar for each observation, then sum over age groups
+sort age 
+gen loglja=lnleisure*wbar 
+by age: egen logla=total(loglja) 
+
+*********************************
+gen eps_lja=eps_leisure*wbar 
+by age: egen eps_la=total(eps_lja) 
+*********************************
+
+*create la, which are sums of leisure*wbar within age groups.
+* Will be used to calculate cbar and lbar
+
+gen lja=leisure*wbar
+by age: egen la=total(lja)
+
+order country country_code year age logla eps_la wbar 
+
+
+*collapse dataset to have one observation(row) per age group.
+ 
+collapse (mean) logla=logla eps_la la=la s_FRAa=s_FRAa  delta_s_FRAa= delta_s_FRAa, by(country_code year age)
+
+*If la=0 then age must be missing.
+gen missing_age=0
+replace missing_age=1 if la==0
+*list
+
+*Convert variables for missing ages from zero to missing
+foreach var in logla eps_la la {
+replace `var'=. if (missing_age==1) 
+}
+
+
+*interpolate logca, logla, ca, la for missing ages
+foreach var in logla eps_la la {
+ipolate `var' age, gen(i`var')
+replace `var'=i`var'
+drop i`var'
+}
+
+* replace missing values by neighboring non-missing values
+sort age
+foreach var in logla eps_la la{
+replace `var' = `var'[_n-1] if missing(`var')
+}
+
+*generate log_lbar, the log of average la, with s_FRAa as weights
+* 
+
+gen lbar_a = s_FRAa*la
+egen lbar = total(lbar_a)
+gen log_lbar = ln(lbar)
+
+****************************************
+scalar eps_lbar = ((1-lbar)^((1+$epsilon)/$epsilon))/((1+$epsilon)/$epsilon)
+di eps_lbar
+****************************************
+
+*generate Elogl
+
+gen logl_a = logla*s_FRAa
+egen Elogl = total(logl_a)
+
+**************************
+gen epsl_a = eps_la*s_FRAa
+egen Eeps_l = total(epsl_a)
+drop lbar_a epsl_a
+**************************
+
+* Storing base year values in scalars for use in STEP III
+
+scalar eps_lbar_84=eps_lbar
+scalar Eeps_l_84=Eeps_l
+
+scalar epsLbar_FRA_84=eps_lbar_84 
+scalar Lineq_FRA_84=-$theta*(Eeps_l_84-eps_lbar)
+
+di epsLbar_FRA_84
+di Lineq_FRA_84
+
+
+**********************************************************************************
+*********						STEP II 					 		 *************
+********* Finding growth lambda's (uses) output of STEP I and STEP II ************
+**********************************************************************************
+
+
+**Set type of allocation rule:
+//* 1=Equal Allocation Rule
+//* 2=Square Root Rule
+//* 3=OECD Modified Equivalence Scale
+
+scalar rule=1
+
+
+**open 2005 consumption data file. Discard age > 100 and renormalize weights
+quietly {
+use "FRA_05.dta", clear
+*use "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\FRA\FRA_05.dta", clear
+
+*destring pcode, replace
+
+drop if age > 100
+drop if age==.
+
+ren weight weight_temp
+egen weight_total=total(weight_temp)
+gen weight = weight_temp/weight_total
+drop weight_total weight_temp
+}
+
+*Apply country year identifying variables to each observation 
+*	to facilitate merge with survival data
+
+gen country="France"
+gen country_code="FRA" 
+gen int year=2005
+order country country_code year 
+
+/*Create an OECD Modified Equivalence Scale variable 
+quietly{
+gen OECD1=1 if pcode==1
+gen OECD2=0.5 if pcode~=1 & age>=14
+gen OECD3=0.3 if pcode~=1 & age<14
+egen OECDw= rsum(OECD1 OECD2 OECD3)
+by hhid: egen OECDscale= total(OECDw)
+drop OECD1 OECD2 OECD3 OECDw
+lab var OECDscale "OECD Modified Equivalent Scale for household allocation"
+}
+*/
+*apply allocation rule 
+foreach var in hhexp {
+if rule==1 {
+replace `var'=`var'/hhsize
+}
+else if rule==2 {
+replace `var'=`var'/sqrt(hhsize)
+}
+else if rule==3 {
+replace `var'=`var'/OECDscale
+}
+}
+
+*Now that we have allocated expenditures to individuals, convert individual consumption from 
+* 	2005 French francs to constant international prices, incorporate govt consumption
+* 	using Penn World Tables 6.3, and scale to year $baseyear US $
+ 
+gen wc=weight*hhexp
+lab var wc "weight*hhexp"
+quietly {
+su wc
+}
+return list
+scalar sum_wc=r(sum) 
+
+*Bring in cpop and gpop by merging with PWT_cpop_gpop.dta
+sort country_code year 
+merge m:m country_code year using "$pwt_file"
+*merge m:m country_code year using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\PWT 6.3\PWT_cpop_gpop.dta"
+keep if country_code=="FRA"
+keep if year==2005
+gen c_hat_jit=(cpop/sum_wc)*hhexp + gpop 
+gen chat= c_hat_jit / cgpop_US_$baseyear
+lab var chat "per capita consumption scaled by $baseyear U.S. $"
+drop c_hat_jit wc cpop gpop cgpop cgpop_US_$baseyear _merge 
+
+*Check that the weighted average of chat is ?
+gen wchat=weight*chat
+su wchat
+return list
+
+**Compute ln(chat) ln(leisure)
+foreach var in chat leisure {
+qui {
+gen ln`var'=ln(`var')
+}
+}
+
+
+
+****************************************
+gen eps_leisure=((1-leisure)^((1+$epsilon)/$epsilon))/((1+$epsilon)/$epsilon)
+su eps_leisure
+scalar sd_eps_leisure_unwt=r(sd)
+****************************************
+
+*sum weights within age groups, create wbar:
+*(individual sampling weight)/(sum of all individual sampling weights in age group) 
+sort age 
+by age: egen total_age_weight=total(weight)
+gen wbar=weight/total_age_weight 
+drop weight total_age_weight
+order age
+
+*Check that wbar sums to 1 within each age group
+*by age: egen total_wbar_a=total(wbar)
+*list age total_wbar_a
+
+*Merge with country-age level survival rates
+sort country country_code year age 
+merge m:1 country_code year age using "$survival_ind/survivalFRA90.dta"
+*merge m:1 country_code year age using "C:\Documents and Settings\Pete Klenow\My Documents\My Documents\Rawls\Survival Rates\survivalFRA90.dta"
+keep if year==2005
+keep if country_code=="FRA"
+drop _merge
+
+**Compute stdev of ln(leisure) with FRA base period demographic weights
+foreach var in lnchat lnleisure {
+qui {
+su `var' [weight=s_FRAa*wbar]
+return list
+scalar sd_`var'_w=r(sd)
+}
+}
+di sd_lnchat_w 
+di sd_lnleisure_w
+
+
+*create logca, averages over people of the same age. 
+* first create lnchat*wbar for each observation, then sum over age groups
+sort age 
+gen logcja=lnchat*wbar
+by age: egen logca=total(logcja)
+gen loglja=lnleisure*wbar 
+by age: egen logla=total(loglja) 
+
+*********************************
+gen eps_lja=eps_leisure*wbar 
+by age: egen eps_la=total(eps_lja) 
+*********************************
+
+*create ca, which are sums of chat*wbar within age groups.
+* Will be used to calculate cbar
+gen cja=chat*wbar
+by age: egen ca=total(cja)
+gen lja=leisure*wbar
+by age: egen la=total(lja)
+
+order country country_code year age logca ca logla eps_la la wbar 
+
+*collapse dataset to have one observation(row) per age group.
+
+collapse (mean) logca=logca logla=logla eps_la la=la ca=ca s_FRAa=s_FRAa  delta_s_FRAa= delta_s_FRAa, by(country_code year age)
+
+*If ca=0 then age must be missing.
+gen missing_age=0
+replace missing_age=1 if ca==0
+*list
+
+*Convert variables for missing ages from zero to missing 
+foreach var in logca ca logla eps_la la{
+replace `var'=. if (missing_age==1) 
+}
+
+
+*interpolate logca, logla, ca, la for missing ages
+foreach var in logca logla eps_la ca la {
+ipolate `var' age, gen(i`var')
+replace `var'=i`var'
+drop i`var'
+}
+
+* replace missing values by neighboring non-missing values
+sort age
+foreach var in logca logla eps_la ca la{
+replace `var' = `var'[_n-1] if missing(`var')
+}
+
+gen utila = $ubar + logca + logla
+
+*generate log_cbar, the log of average ca, with s_FRAa as weights
+
+gen cbar_a = s_FRAa*ca
+egen cbar = total(cbar_a)
+di cbar
+scalar log_cbar = ln(cbar)
+di log_cbar
+
+*generate log_lbar, the log of average la, with sa as weights
+
+gen lbar_a = s_FRAa*la
+egen lbar = total(lbar_a)
+scalar log_lbar = ln(lbar)
+di lbar
+di log_lbar
+
+****************************************
+scalar eps_lbar = ((1-lbar)^((1+$epsilon)/$epsilon))/((1+$epsilon)/$epsilon)
+di eps_lbar
+****************************************
+
+
+*generate Elogc
+gen logc_a = logca*s_FRAa
+egen Elogc = total(logc_a)
+
+*generate Elogl
+
+gen logl_a = logla*s_FRAa
+egen Elogl = total(logl_a)
+
+**************************
+gen epsl_a = eps_la*s_FRAa
+egen Eeps_l = total(epsl_a)
+drop lbar_a cbar_a epsl_a
+**************************
+
+
+* Calculate lambda components
+
+** Calculate life expectancy term
+gen ua = ($ubar + logca - $theta*eps_la)
+gen LE_a =  delta_s_FRAa*ua
+*list age LE_a
+egen LE = total(LE_a)
+scalar log_lambda_LE= LE
+
+* Calculate average consumption term
+scalar log_lambda_C_avg = log_cbar - ln(Cbar_FRA_84)
+
+* Calculate average leisure term
+scalar log_lambda_L_avg = -$theta*(eps_lbar - epsLbar_FRA_84)
+
+* Calculate consumption inequality term
+scalar log_lambda_C_ineq = Elogc - log_cbar - Cineq_FRA_84
+
+* Calculate leisure inequality term
+scalar log_lambda_L_ineq = -$theta*(Eeps_l-eps_lbar) - Lineq_FRA_84
+
+* Calculate lambda, i.e., the sum of the terms
+
+scalar log_lambda = log_lambda_LE + log_lambda_C_avg + log_lambda_L_avg + log_lambda_C_ineq + log_lambda_L_ineq
+
+
+* Lambda Decomposition for FRA 1984-2005
+
+{
+di log_lambda_LE
+di log_lambda_C_avg
+di log_lambda_L_avg
+di log_lambda_C_ineq
+di log_lambda_L_ineq
+di log_lambda
+}
+
+*log close
