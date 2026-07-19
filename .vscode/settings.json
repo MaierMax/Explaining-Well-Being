@@ -3,6 +3,7 @@
         "*.copilotmd": "vscode.markdown.preview.editor",
         "{git,gitlens,conflictResolution,vscode-local-history}:/**/*.tc.json": "default",
         "{git,gitlens,conflictResolution,vscode-local-history}:/**/*.{asl.json,asl.yaml,asl.yml}": "default",
-        "file:/**/*.xlsx": "jupyter-data-wrangler"
+        "file:/**/*.xlsx": "jupyter-data-wrangler",
+        "file:/**/*.csv": "jupyter-data-wrangler"
     }
 }
